@@ -24,11 +24,17 @@ from cloud_music_mcp.api import (
     send_captcha, cellphone_login,
     # 歌单
     get_user_playlists, get_playlist_detail, get_playlist_all,
+    create_playlist, add_songs_to_playlist,
     # 歌曲
     get_song_detail, get_music_url, get_lyric, check_music,
     like_song, get_likelist, get_simi_song,
+    check_song_visible, make_web_link,
     # 下载 & VIP
     download_song, get_vip_info, QUALITY_LEVELS,
+    # 队列
+    queue_add, queue_get, queue_clear, queue_play,
+    # 偏好分析
+    get_liked_songs_for_analysis,
     # 评论
     get_comment_music, get_comment_playlist, get_comment_album,
     # 搜索
@@ -713,35 +719,236 @@ def cloud_music_toplist():
 @mcp.tool()
 def cloud_music_play(id: str, type: str = "song"):
     """
-    播放歌曲/歌单/MV/专辑
+    播放歌曲/歌单/MV/专辑（自动检查歌曲可见性）
 
     Args:
         id: ID
         type: 'song'(歌曲) / 'playlist'(歌单) / 'mv'(MV) / 'album'(专辑)
     """
-    if type in ("song", "mv"):
-        url = f"orpheus://{type}?id={id}"
-    elif type in ("playlist", "album"):
-        url = f"orpheus://{type}?id={id}"
-    else:
-        url = f"orpheus://song?id={id}"
+    web_link = make_web_link(type, id)
 
+    # 歌曲：先检查可见性
+    if type == "song":
+        vis = check_song_visible(id)
+        if not vis.get("playable"):
+            return f"⚠️ 无法播放\n🎵 {vis.get('name', id)}\n❌ {vis['reason']}\n🔗 {web_link}"
+        info = f"🎵 {vis.get('name', id)} - {vis.get('artist', '')}"
+        if vis.get("vip_only"):
+            info += " [VIP]"
+    else:
+        info = f"{type} ID: {id}"
+
+    # 通过 orpheus 唤起
+    import sys as _sys
     try:
-        if sys.platform == "win32":
-            subprocess.run(["powershell", "-Command", f'Start-Process "{url}"'], check=True)
+        from cloud_music_mcp.api import play_song, play_playlist
+        if type in ("song", "mv"):
+            play_song(id)
         else:
-            subprocess.run(["open", url], check=True)
-        return f"▶️ 正在播放 {type} ID: {id}"
+            play_playlist(id)
+        return f"▶️ {info}\n🔗 {web_link}"
     except Exception:
         try:
-            web = f"https://music.163.com/#/{type}?id={id}"
-            if sys.platform == "win32":
-                subprocess.run(["powershell", "-Command", f'Start-Process "{web}"'], check=True)
+            if _sys.platform == "win32":
+                subprocess.run(["powershell", "-Command", f'Start-Process "{web_link}"'], check=True)
             else:
-                subprocess.run(["open", web], check=True)
-            return f"⚠️ 已通过浏览器打开"
+                subprocess.run(["open", web_link], check=True)
+            return f"⚠️ 已通过浏览器打开\n🔗 {web_link}"
         except Exception as ex:
-            return f"❌ 播放失败: {ex}"
+            return f"❌ 播放失败: {ex}\n🔗 {web_link}"
+
+
+# ==================== 播放队列 (4个) ====================
+
+@mcp.tool()
+def cloud_music_queue_add(id: str, name: str = "", artist: str = ""):
+    """
+    添加歌曲到播放队列（先不播放）
+
+    Args:
+        id: 歌曲ID
+        name: 歌曲名（可选）
+        artist: 歌手名（可选）
+    """
+    if e := _guard(): return e
+    # 内容安全检查
+    if name:
+        from cloud_music_mcp.api import check_content_safe
+        cs = check_content_safe(name)
+        if not cs["safe"]:
+            return f"⚠️ {cs['reason']}"
+    count = queue_add(id, name, artist)
+    info = f"{name} - {artist}" if name else id
+    return f"📋 已加入队列 (#{count}): {info}\n💡 使用 cloud_music_queue_show 查看队列\n▶️ 使用 cloud_music_queue_play 播放全部"
+
+
+@mcp.tool()
+def cloud_music_queue_show():
+    """查看当前播放队列"""
+    if e := _guard(): return e
+    q = queue_get()
+    if not q:
+        return "📋 队列为空\n💡 使用 cloud_music_queue_add 添加歌曲"
+    lines = [f"📋 播放队列 ({len(q)} 首):"]
+    for i, s in enumerate(q, 1):
+        label = f"{s.get('name', '')} - {s.get('artist', '')}" if s.get('name') else s['id']
+        lines.append(f"  {i:2}. {label}  🔗 {make_web_link('song', s['id'])}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def cloud_music_queue_clear():
+    """清空播放队列"""
+    if e := _guard(): return e
+    queue_clear()
+    return "🗑️ 队列已清空"
+
+
+@mcp.tool()
+def cloud_music_queue_play():
+    """播放队列中的所有歌曲（通过创建临时歌单）"""
+    if e := _guard(): return e
+    r = queue_play()
+    if r["success"]:
+        lines = [f"▶️ {r['message']}"]
+        for i, name in enumerate(r.get("songs", []), 1):
+            lines.append(f"  {i:2}. {name}")
+        lines.append(f"🔗 {r.get('web_link', '')}")
+        return "\n".join(lines)
+    return f"❌ {r['message']}"
+
+
+# ==================== 歌单管理 (2个) ====================
+
+@mcp.tool()
+def cloud_music_create_playlist(name: str, description: str = "", song_ids: str = ""):
+    """
+    创建歌单，可选添加歌曲
+
+    Args:
+        name: 歌单名称
+        description: 歌单描述（可选）
+        song_ids: 歌曲ID列表，逗号分隔（可选，如 "123,456,789"）
+    """
+    if e := _guard(): return e
+    r = create_playlist(name, description)
+    data = r.get("data", r)
+    if data.get("code") == 200:
+        pid = data.get("id") or data.get("playlist", {}).get("id")
+        if not pid:
+            return f"❌ 创建歌单失败: {data}"
+        lines = [f"✅ 歌单已创建: {name}", f"🆔 ID: {pid}"]
+        # 添加歌曲
+        if song_ids:
+            ids = [sid.strip() for sid in song_ids.split(",") if sid.strip()]
+            if ids:
+                add_r = add_songs_to_playlist(pid, ids)
+                add_data = add_r.get("data", add_r)
+                if add_data.get("code") == 200:
+                    lines.append(f"🎵 已添加 {len(ids)} 首歌曲")
+                else:
+                    lines.append(f"⚠️ 歌单已创建，但添加歌曲失败: {add_data}")
+        lines.append(f"🔗 {make_web_link('playlist', pid)}")
+        return "\n".join(lines)
+    return f"❌ 创建歌单失败: {data}"
+
+
+# ==================== 偏好分析 (1个) ====================
+
+@mcp.tool()
+def cloud_music_preference_analysis():
+    """
+    分析红心歌曲偏好画像（多维度：曲风、艺人、语言、情绪等）
+
+    基于最近200首红心歌曲进行内容+风格分析，生成用户音乐偏好画像。
+    """
+    if e := _guard(): return e
+    from collections import Counter
+
+    r = get_liked_songs_for_analysis(limit=200)
+    if not r.get("success"):
+        return f"❌ {r.get('error', '分析失败')}"
+
+    songs = r.get("songs", [])
+    if not songs:
+        return "⚠️ 未找到红心歌曲数据"
+
+    # 统计维度
+    artist_counter = Counter()
+    album_counter = Counter()
+    total_duration = 0
+    fee_counter = Counter()
+    cover_type_counter = Counter()
+
+    for s in songs:
+        artists = s.get("artist", "").split(", ")
+        for ar in artists[:2]:
+            artist_counter[ar] += 1
+        album_counter[s.get("album", "")] += 1
+        total_duration += s.get("duration", 0)
+        fee_counter[s.get("fee", 0)] += 1
+        cover_type_counter[s.get("origin_cover_type", 0)] += 1
+
+    # 语言分布
+    chinese_count = 0
+    japanese_count = 0
+    english_count = 0
+    for s in songs:
+        name = s.get("name", "") + s.get("artist", "")
+        has_cjk = any('\u4e00' <= c <= '\u9fff' for c in name)
+        has_kana = any('\u3040' <= c <= '\u30ff' for c in name)
+        if has_kana:
+            japanese_count += 1
+        elif has_cjk:
+            chinese_count += 1
+        else:
+            english_count += 1
+
+    # 平均时长
+    avg_duration_ms = total_duration // max(len(songs), 1)
+    avg_mins, avg_secs = divmod(avg_duration_ms // 1000, 60)
+
+    # 付费类型分布
+    fee_labels = {0: "免费", 1: "VIP专享", 4: "付费专辑", 8: "付费单曲"}
+
+    top_artists = artist_counter.most_common(8)
+    top_albums = album_counter.most_common(3)
+
+    lines = [
+        f"🎧 音乐偏好画像 (基于最近 {r['analyzed_count']} 首 | 总计 {r['total_liked']} 首红心)",
+        "",
+    ]
+
+    lines.append(f"🌐 语言偏好:")
+    total = max(chinese_count + japanese_count + english_count, 1)
+    lines.append(f"  华语: {chinese_count}首 ({chinese_count*100//total}%)")
+    lines.append(f"  日语: {japanese_count}首 ({japanese_count*100//total}%)")
+    lines.append(f"  英语/其他: {english_count}首 ({english_count*100//total}%)")
+    lines.append("")
+
+    if top_artists:
+        lines.append("🎤 高频艺人:")
+        for ar, count in top_artists:
+            lines.append(f"  {ar}: {count}首")
+        lines.append("")
+
+    if top_albums and top_albums[0][0]:
+        lines.append("💿 高重复专辑:")
+        for album, count in top_albums:
+            if count >= 2:
+                lines.append(f"  {album}: {count}首")
+        lines.append("")
+
+    lines.append(f"⏱️ 平均时长: {avg_mins}分{avg_secs:02d}秒")
+
+    # 付费分析
+    if len(fee_counter) > 1:
+        parts = [f"{fee_labels.get(k, str(k))}: {v}首" for k, v in fee_counter.most_common()]
+        lines.append(f"💎 付费类型: {', '.join(parts)}")
+
+    lines.append("")
+    lines.append("💡 想基于画像智能搜索？试试「根据我的偏好找歌单」或「推荐纯音乐」")
+    return "\n".join(lines)
 
 
 # ==================== 下载 (1个) ====================

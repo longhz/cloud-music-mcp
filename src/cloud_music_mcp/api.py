@@ -825,3 +825,156 @@ def play_playlist(playlist_id, playlist_name=None):
         else:
             subprocess.run(["open", web_url])
         return f"已在浏览器中播放: {web_url}"
+
+
+# ==================== 歌曲可见性检查 ====================
+
+def check_song_visible(song_id):
+    """检查歌曲是否可播放"""
+    check = check_music(song_id)
+    check_data = check.get("data", check)
+    if check_data.get("code") != 200:
+        return {"playable": False, "reason": "歌曲不可用（版权/下架）"}
+    detail = get_song_detail([song_id])
+    detail_data = detail.get("data", detail)
+    if detail_data.get("code") == 200 and "songs" in detail_data:
+        song = detail_data["songs"][0]
+        fee = song.get("fee", 0)
+        if fee == 4:
+            return {"playable": False, "reason": "付费专辑，需单独购买"}
+        privilege = song.get("privilege", {})
+        if privilege.get("st", 0) < 0:
+            return {"playable": False, "reason": "已下架或不可用"}
+        return {
+            "playable": True, "reason": "",
+            "fee": fee, "vip_only": fee == 1,
+            "name": song.get("name", ""),
+            "artist": ", ".join(ar.get("name", "") for ar in song.get("ar", [])),
+        }
+    return {"playable": False, "reason": "无法获取歌曲信息"}
+
+
+def make_web_link(resource_type, resource_id):
+    """生成网易云音乐网页链接"""
+    return f"https://music.163.com/#/{resource_type}?id={resource_id}"
+
+
+# ==================== 歌单创建与管理 ====================
+
+def create_playlist(name, description=""):
+    """创建歌单"""
+    ts = int(time.time() * 1000)
+    data = {"name": name, "timestamp": ts}
+    if description:
+        data["description"] = description
+    return _post("/playlist/create", data=data)
+
+
+def add_songs_to_playlist(playlist_id, song_ids):
+    """添加歌曲到歌单"""
+    ts = int(time.time() * 1000)
+    tracks = ",".join(str(sid) for sid in song_ids)
+    return _get("/playlist/tracks", params={
+        "op": "add", "pid": str(playlist_id),
+        "tracks": tracks, "timestamp": ts,
+    })
+
+
+# ==================== 播放队列管理 ====================
+
+_queue = []
+
+
+def queue_add(song_id, song_name="", artist=""):
+    """添加歌曲到播放队列（内存）"""
+    _queue.append({"id": str(song_id), "name": song_name, "artist": artist})
+    return len(_queue)
+
+
+def queue_get():
+    """获取当前队列"""
+    return list(_queue)
+
+
+def queue_clear():
+    """清空队列"""
+    _queue.clear()
+    return 0
+
+
+def queue_play(max_songs=50):
+    """播放队列：创建临时歌单 → 加歌 → 播放"""
+    if not _queue:
+        return {"success": False, "message": "队列为空"}
+    songs = _queue[:max_songs]
+    names = [f"{s.get('name', '')} - {s.get('artist', '')}" for s in songs]
+    playlist_name = f"MCP队列 - {time.strftime('%H:%M:%S')}"
+    create_result = create_playlist(playlist_name)
+    create_data = create_result.get("data", create_result)
+    if create_data.get("code") != 200:
+        return {"success": False, "message": f"创建临时歌单失败: {create_result}"}
+    pid = create_data.get("id") or create_data.get("playlist", {}).get("id")
+    if not pid:
+        return {"success": False, "message": "无法获取歌单ID"}
+    song_ids = [s["id"] for s in songs]
+    add_result = add_songs_to_playlist(pid, song_ids)
+    add_data = add_result.get("data", add_result)
+    if add_data.get("code") != 200:
+        return {"success": False, "message": f"添加歌曲失败: {add_result}"}
+    play_playlist(pid, playlist_name)
+    _queue.clear()
+    return {
+        "success": True,
+        "message": f"已播放 {len(songs)} 首歌",
+        "playlist_id": pid,
+        "songs": names,
+        "web_link": make_web_link("playlist", pid),
+    }
+
+
+# ==================== 偏好分析 ====================
+
+def get_liked_songs_for_analysis(limit=200):
+    """获取红心歌曲详细信息用于偏好分析"""
+    cookies = load_cookies()
+    uid = cookies.get("__uid", "")
+    if not uid:
+        status = get_current_login_status()
+        status_data = status.get("data", status)
+        if status_data.get("code") == 200:
+            uid = (status_data.get("profile", {}).get("userId") or
+                   status_data.get("account", {}).get("id", ""))
+    if not uid:
+        return {"success": False, "error": "无法获取用户ID，请先登录"}
+    result = get_likelist(uid)
+    data = result.get("data", result)
+    if data.get("code") != 200:
+        return {"success": False, "error": "获取红心列表失败"}
+    all_ids = data.get("ids", [])
+    recent_ids = all_ids[-limit:] if len(all_ids) > limit else all_ids
+    recent_ids = list(reversed(recent_ids))
+    songs_data = []
+    for i in range(0, len(recent_ids), 100):
+        batch = recent_ids[i:i+100]
+        detail = get_song_detail(batch)
+        detail_data = detail.get("data", detail)
+        if detail_data.get("code") == 200 and "songs" in detail_data:
+            for song in detail_data["songs"]:
+                artists = [ar.get("name", "") for ar in song.get("ar", [])]
+                songs_data.append({
+                    "id": song.get("id"),
+                    "name": song.get("name", ""),
+                    "artist": ", ".join(artists),
+                    "album": song.get("al", {}).get("name", ""),
+                    "duration": song.get("dt", 0),
+                    "fee": song.get("fee", 0),
+                    "publish_time": song.get("publishTime", 0),
+                    "origin_cover_type": song.get("originCoverType", 0),
+                    "mark": song.get("mark", 0),
+                })
+    return {
+        "success": True,
+        "total_liked": len(all_ids),
+        "analyzed_count": len(songs_data),
+        "songs": songs_data,
+    }
