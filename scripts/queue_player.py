@@ -114,9 +114,9 @@ def _play_one(song, index, total):
         print(f"   [FAIL] 播放失败: {e}")
         return False
 
-    # 给客户端启动时间
-    time.sleep(2.0)
-    wait_sec = max(0, song["duration_ms"] / 1000 - 2.0)
+    # 给客户端启动时间 + 提前 6s 推送下一首（覆盖切换延迟）
+    time.sleep(1.0)
+    wait_sec = max(1, song["duration_ms"] / 1000 - 7.0)
 
     # 等待播放完成，每 3 秒检测一次客户端存活
     elapsed = 0.0

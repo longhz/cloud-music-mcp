@@ -966,7 +966,7 @@ def get_liked_songs_for_analysis(limit=200):
         detail_data = detail.get("data", detail)
         if detail_data.get("code") == 200 and "songs" in detail_data:
             for song in detail_data["songs"]:
-                artists = [ar.get("name", "") for ar in song.get("ar", [])]
+                artists = [(ar.get("name") or "") for ar in song.get("ar", [])]
                 songs_data.append({
                     "id": song.get("id"),
                     "name": song.get("name", ""),
