@@ -834,7 +834,7 @@ def cloud_music_create_playlist(name: str, description: str = "", song_ids: str 
     r = create_playlist(name, description)
     data = r.get("data", r)
     if data.get("code") == 200:
-        pid = data.get("id") or data.get("playlist", {}).get("id")
+        pid = (data.get("playlist", {}).get("id") or data.get("id"))
         if not pid:
             return f"❌ 创建歌单失败: {data}"
         lines = [f"✅ 歌单已创建: {name}", f"🆔 ID: {pid}"]

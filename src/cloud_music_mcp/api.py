@@ -911,16 +911,22 @@ def queue_play(max_songs=50):
     playlist_name = f"MCP队列 - {time.strftime('%H:%M:%S')}"
     create_result = create_playlist(playlist_name)
     create_data = create_result.get("data", create_result)
-    if create_data.get("code") != 200:
-        return {"success": False, "message": f"创建临时歌单失败: {create_result}"}
-    pid = create_data.get("id") or create_data.get("playlist", {}).get("id")
+    # /playlist/create 返回 {code: 200, playlist: {id: xxx}} 或 {code: 200, id: xxx}
+    create_body = create_data.get("body", create_data)
+    if create_data.get("code") != 200 and create_body.get("code") != 200:
+        return {"success": False, "message": f"创建临时歌单失败: {create_body}"}
+    pid = (create_data.get("playlist", {}).get("id") or
+           create_body.get("id") or
+           create_data.get("id"))
     if not pid:
         return {"success": False, "message": "无法获取歌单ID"}
     song_ids = [s["id"] for s in songs]
     add_result = add_songs_to_playlist(pid, song_ids)
     add_data = add_result.get("data", add_result)
-    if add_data.get("code") != 200:
-        return {"success": False, "message": f"添加歌曲失败: {add_result}"}
+    # /playlist/tracks 返回 {body: {code: 200}} 或直接 {code: 200}
+    add_body = add_data.get("body", add_data)
+    if add_body.get("code") != 200:
+        return {"success": False, "message": f"添加歌曲失败: {add_body}"}
     play_playlist(pid, playlist_name)
     _queue.clear()
     return {
