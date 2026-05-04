@@ -1,0 +1,9 @@
+{
+  "name": "cloud-music-mcp",
+  "version": "1.0.0",
+  "description": "Node.js proxy dependencies for Netease Cloud Music API encryption",
+  "private": true,
+  "dependencies": {
+    "@neteasecloudmusicapienhanced/api": "^4.32.0"
+  }
+}

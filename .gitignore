@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Node.js
+node_modules/
+
+# Sensitive Data (Cookies & Sessions)
+**/storage/*.json
+**/storage/*.ncm
+**/storage/*.png
+
+# Logs
+*.log
+logs/
+
+# Mac
+.DS_Store
+
+# Python Eggs
+*.egg-info/
+*.egg/
+
+# SQLite Databases
+*.sqlite
+*.sqlite3
+*.db
